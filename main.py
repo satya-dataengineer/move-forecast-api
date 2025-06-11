@@ -13,6 +13,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import numpy as np
 import random
+import glob
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -148,7 +149,6 @@ model_cache = {}
 # Load Prophet models at startup
 def load_models(model_dir='prophet_models'):
     global model_cache
-    model_dir = "/opt/render/project/src/prophet_models" if os.environ.get("RENDER") else model_dir
     os.makedirs(model_dir, exist_ok=True)
     for model_path in glob.glob(os.path.join(model_dir, '*.pkl')):
         branch = os.path.splitext(os.path.basename(model_path))[0].replace("prophet_model_", "")
@@ -158,6 +158,8 @@ def load_models(model_dir='prophet_models'):
             logger.info(f"Loaded model for {branch}")
         except Exception as e:
             logger.error(f"Error loading model {model_path}: {str(e)}")
+    if not model_cache:
+        raise ValueError("No models loaded from prophet_models/")
     logger.info(f"Loaded {len(model_cache)} Prophet models")
 
 # Load models at startup
@@ -333,12 +335,10 @@ async def root():
 async def forecast_endpoint(input_data: ForecastInput):
     try:
         logger.info(f"Received request: {input_data.dict()}")
-        model_dir = "/opt/render/project/src/prophet_models" if os.environ.get("RENDER") else "prophet_models"
         result = forecast_move(
             input_date=input_data.date,
             input_branch=input_data.branch,
-            input_move_type=input_data.move_type,
-            model_dir=model_dir
+            input_move_type=input_data.move_type
         )
         return result
     except ValueError as e:
