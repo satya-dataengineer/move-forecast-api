@@ -28,9 +28,6 @@ venv.bak/
 .env.production.local
 .env.bak
 
-# Project-specific
-prophet_models/
-
 # FastAPI/Testing
 *.log
 *.cache
