@@ -71,16 +71,35 @@ def fetch_historical_percentages(branch, move_type, month, day):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # Try day-specific percentage
             cursor.execute("""
                 SELECT avg_percentage
                 FROM historical_percentages
                 WHERE branch = %s AND move_type = %s AND month = %s AND day = %s
             """, (branch, move_type, month, day))
             result = cursor.fetchone()
-            return result['avg_percentage'] if result else None
+            if result:
+                logger.info(f"Found day-specific percentage: {result['avg_percentage']}% for {branch}, {move_type}, month {month}, day {day}")
+                return result['avg_percentage']
+            
+            # Fallback to monthly average
+            cursor.execute("""
+                SELECT AVG(avg_percentage) as avg_percentage
+                FROM historical_percentages
+                WHERE branch = %s AND move_type = %s AND month = %s
+            """, (branch, move_type, month))
+            result = cursor.fetchone()
+            if result and result['avg_percentage'] is not None:
+                logger.info(f"Using monthly average percentage: {result['avg_percentage']}% for {branch}, {move_type}, month {month}")
+                return result['avg_percentage']
+            
+            # Fallback to minimal percentage
+            minimal_percentage = 1.0  # 1% as a logical default
+            logger.warning(f"No percentage data for {branch}, {move_type}, month {month}. Using minimal percentage: {minimal_percentage}%")
+            return minimal_percentage
     except Exception as e:
         logger.error(f"Error fetching historical percentage: {str(e)}")
-        return None
+        return 1.0  # Minimal percentage on error
     finally:
         if conn is not None:
             conn.close()
@@ -207,8 +226,6 @@ def forecast_move(input_date, input_branch, input_move_type=None, model_dir='pro
             month = input_date_dt.month
             day = input_date_dt.day
             percentage = fetch_historical_percentages(input_branch, input_move_type, month, day)
-            if percentage is None:
-                raise ValueError(f"No percentage data for {input_branch}, {input_move_type}, {month}, {day}")
         
         # Step 7: Prepare output
         predicted_summary = []
@@ -268,8 +285,7 @@ def forecast_move(input_date, input_branch, input_move_type=None, model_dir='pro
                 if forecast_date < today:
                     continue
                 hist_avg = fetch_historical_percentages(input_branch, input_move_type, forecast_date.month, forecast_date.day)
-                if hist_avg is not None:
-                    historical_percentages.append(hist_avg)
+                historical_percentages.append(hist_avg)
             
             historical_period_avg = sum(historical_percentages) / len(historical_percentages) if historical_percentages else percentage
             period_percentage_diff = current_percentage - historical_period_avg
