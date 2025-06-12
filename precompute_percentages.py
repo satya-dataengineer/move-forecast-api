@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Database connection config
-DATABASE_URL = os.environ.get("DATABASE_URL")
+DATABASE_URL=os.environ.get("DATABASE_URL")
 
 # Checkpoint file
 CHECKPOINT_FILE = 'checkpoint.json'
@@ -31,32 +31,54 @@ except Exception as e:
     logger.error(f"Failed to connect to database: {str(e)}")
     raise
 
-# Drop and recreate table to ensure fresh start
+# Check if historical_percentages table exists and has data
 try:
-    logger.info("Dropping historical_percentages table if exists")
-    cursor.execute("DROP TABLE IF EXISTS historical_percentages")
     cursor.execute("""
-        CREATE TABLE historical_percentages (
-            branch VARCHAR,
-            move_type VARCHAR,
-            month INT,
-            day INT,
-            avg_percentage FLOAT,
-            PRIMARY KEY (branch, move_type, month, day)
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = 'historical_percentages'
         )
     """)
-    conn.commit()
-    logger.info("Created fresh historical_percentages table")
+    table_exists = cursor.fetchone()[0]
+    
+    if table_exists:
+        cursor.execute("SELECT COUNT(*) FROM historical_percentages")
+        row_count = cursor.fetchone()[0]
+        if row_count > 0:
+            logger.info(f"historical_percentages table exists with {row_count} rows; reusing")
+        else:
+            logger.info("historical_percentages table exists but is empty; recreating")
+            cursor.execute("DROP TABLE historical_percentages")
+            table_exists = False
+    
+    if not table_exists:
+        logger.info("Creating historical_percentages table")
+        cursor.execute("""
+            CREATE TABLE historical_percentages (
+                branch VARCHAR,
+                move_type VARCHAR,
+                month INT,
+                day INT,
+                avg_percentage FLOAT,
+                PRIMARY KEY (branch, move_type, month, day)
+            )
+        """)
+        conn.commit()
 except Exception as e:
-    logger.error(f"Error creating table: {str(e)}")
+    logger.error(f"Error checking/creating table: {str(e)}")
     raise
 
-# Clear checkpoint
-if os.path.exists(CHECKPOINT_FILE):
-    os.remove(CHECKPOINT_FILE)
-    logger.info("Cleared checkpoint file")
+# Create indexes for performance
+try:
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_move_df ON move_df (Branch, MoveType, Date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_historical_df ON historical_df (Branch, Date)")
+    conn.commit()
+    logger.info("Created indexes on move_df and historical_df")
+except Exception as e:
+    logger.error(f"Error creating indexes: {str(e)}")
+    conn.rollback()
 
-# Load checkpoint (should be empty)
+# Load checkpoint
 def load_checkpoint():
     if os.path.exists(CHECKPOINT_FILE):
         with open(CHECKPOINT_FILE, 'r') as f:
@@ -71,8 +93,14 @@ def save_checkpoint(branch, move_type, month, day):
 # Load data for 2021–2024
 try:
     logger.info("Loading data from PostgreSQL for 2021–2024")
-    historical_df = pd.read_sql_query('SELECT "Date", "Branch", "Count" FROM historical_df WHERE EXTRACT(YEAR FROM "Date") IN (2021, 2022, 2023, 2024)', conn)
-    move_df = pd.read_sql_query('SELECT "Date", "Branch", "MoveType", "Count" FROM move_df WHERE EXTRACT(YEAR FROM "Date") IN (2021, 2022, 2023, 2024)', conn)
+    historical_df = pd.read_sql_query(
+        'SELECT "Date", "Branch", "Count" FROM historical_df WHERE EXTRACT(YEAR FROM "Date") BETWEEN 2021 AND 2024',
+        conn
+    )
+    move_df = pd.read_sql_query(
+        'SELECT "Date", "Branch", "MoveType", "Count" FROM move_df WHERE EXTRACT(YEAR FROM "Date") BETWEEN 2021 AND 2024',
+        conn
+    )
     logger.info(f"Loaded {len(historical_df)} rows from historical_df, {len(move_df)} rows from move_df")
 except Exception as e:
     logger.error(f"Error loading data: {str(e)}")
@@ -111,7 +139,7 @@ except Exception as e:
     raise
 
 # Prepare batch inserts
-batch_size = 1000  # Reduced for stability
+batch_size = 1000
 batch = []
 total_inserts = 0
 
@@ -123,11 +151,29 @@ start_month = checkpoint['month']
 start_day = checkpoint['day']
 skip_until = False if start_branch is None else True
 
-# Iterate over combinations
-branches = sorted(move_df['Branch'].unique())  # Sorted for consistency
+# Calculate initial progress
+branches = sorted(move_df['Branch'].unique())
 move_types = sorted(move_df['MoveType'].unique())
 total_iterations = len(branches) * len(move_types) * 12 * 31
-progress_bar = tqdm(total=total_iterations, desc="Processing combinations", initial=0)
+initial_progress = 0
+if skip_until:
+    for b in branches:
+        for mt in move_types:
+            for m in range(1, 13):
+                for d in range(1, 32):
+                    if b == start_branch and mt == start_move_type and m == start_month and d == start_day:
+                        skip_until = False
+                        break
+                    initial_progress += 1
+                if not skip_until:
+                    break
+            if not skip_until:
+                break
+        if not skip_until:
+            break
+
+# Iterate over combinations
+progress_bar = tqdm(total=total_iterations, desc="Processing combinations", initial=initial_progress)
 
 for branch in branches:
     for move_type in move_types:
@@ -165,6 +211,7 @@ for branch in branches:
                         batch.append((branch, move_type, month, day, avg_percentage))
                     else:
                         logger.warning(f"Skipping {branch}, {move_type}, {month}, {day}: total_count is 0")
+                        progress_bar.update(1)
                         continue
 
                     # Batch insert
@@ -179,13 +226,11 @@ for branch in branches:
                             conn.commit()
                             total_inserts += len(batch)
                             logger.info(f"Inserted {total_inserts} records")
+                            save_checkpoint(branch, move_type, month, day + 1)
                             batch = []
                         except Exception as e:
                             logger.error(f"Error inserting batch: {str(e)}")
                             conn.rollback()
-
-                    # Save checkpoint
-                    save_checkpoint(branch, move_type, month, day + 1)
 
                 except Exception as e:
                     logger.error(f"Error processing {branch}, {move_type}, {month}, {day}: {str(e)}")
