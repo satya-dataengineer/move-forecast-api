@@ -16,7 +16,14 @@ import random
 import glob
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('api.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings('ignore')  # Suppress Prophet logging
@@ -75,29 +82,6 @@ def fetch_historical_percentages(branch, move_type, month, day):
         logger.error(f"Error fetching historical percentage: {str(e)}")
         return None
     finally:
-        if conn is not None:
-            conn.close()
-
-# Function to save query to PostgreSQL
-def save_query_to_db(input_date, branch, move_type, forecasted_count):
-    conn = None
-    cursor = None
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        forecasted_count = int(forecasted_count)  # Convert to Python int
-        cursor.execute("""
-            INSERT INTO forecast_queries (input_date, branch, move_type, forecasted_count)
-            VALUES (%s, %s, %s, %s)
-        """, (input_date, branch, move_type, forecasted_count))
-        conn.commit()
-        logger.info(f"Saved query to database: {input_date}, {branch}, {move_type}")
-    except Exception as e:
-        logger.error(f"Error saving query to database: {str(e)}")
-        raise
-    finally:
-        if cursor is not None:
-            cursor.close()
         if conn is not None:
             conn.close()
 
@@ -272,8 +256,6 @@ def forecast_move(input_date, input_branch, input_move_type=None, model_dir='pro
                 "predicted_moves": final_forecast,
                 "comment": comment
             })
-            
-            save_query_to_db(forecast_date, input_branch, input_move_type, final_forecast)
         
         average_daily_moves = int(round(total_predicted_moves / len(predicted_summary))) if predicted_summary else 0
         
@@ -323,6 +305,7 @@ def forecast_move(input_date, input_branch, input_move_type=None, model_dir='pro
         return result
     
     except Exception as e:
+        logger.error(f"Forecast error: {str(e)}")
         raise ValueError(str(e))
 
 # API endpoints
