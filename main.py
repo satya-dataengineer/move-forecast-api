@@ -181,21 +181,18 @@ def forecast_move(input_date, input_branch, input_move_type=None, model_dir='pro
             raise ValueError("Date must be on or before December 31, 2025")
         
         # Step 2: Validate branch
-        branches = fetch_data('SELECT DISTINCT branch FROM historical_percentages')
-        unique_branches = branches['branch'].unique()
-        if input_branch not in unique_branches:
-            raise ValueError(f"Branch {input_branch} not found. Valid branches: {unique_branches.tolist()}")
+        if input_branch not in model_cache:
+            raise ValueError(f"Branch {input_branch} not found. Valid branches: {list(model_cache.keys())}")
         
         # Step 3: Validate move_type if provided
         if input_move_type is not None:
             move_types = fetch_data('SELECT DISTINCT move_type FROM historical_percentages')
             valid_move_types = move_types['move_type'].unique()
             if input_move_type not in valid_move_types:
-                raise ValueError(f"Invalid MoveType. Valid MoveTypes: {valid_move_types.tolist()}")
+                logger.warning(f"Invalid MoveType {input_move_type}. Using minimal percentage.")
+                input_move_type = None  # Treat as no move type to use 100%
         
         # Step 4: Load Prophet model
-        if input_branch not in model_cache:
-            raise ValueError(f"No pre-trained model for branch {input_branch}")
         model = model_cache[input_branch]
         
         # Step 5: Generate forecast for the 15-day window
@@ -247,8 +244,6 @@ def forecast_move(input_date, input_branch, input_move_type=None, model_dir='pro
                 month = forecast_date.month
                 day = forecast_date.day
                 hist_avg = fetch_historical_percentages(input_branch, input_move_type, month, day)
-                if hist_avg is None:
-                    hist_avg = percentage  # Use input date's percentage as fallback
                 
                 implied_percentage = (final_forecast / branch_forecast * 100) if branch_forecast > 0 else 0
                 percentage_diff = implied_percentage - hist_avg
